@@ -1,0 +1,448 @@
+## Use nest_asyncio to allow nested event loops in environments like Colab
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+except ImportError:
+    print("nest_asyncio not found. Some features may not work correctly in Colab.")
+
+## Core stdlib imports (safe)
+import asyncio
+import uuid
+import os
+import json
+import argparse
+from datetime import datetime
+from typing import List, Dict, Any, Optional
+import base64
+from IPython.display import HTML, display, clear_output
+import time
+
+## Optional third-party imports: import safely
+try:
+    import ssl
+    SSL_AVAILABLE = True
+except Exception:
+    SSL_AVAILABLE = False
+
+## Visualization imports
+try:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from matplotlib.animation import FuncAnimation
+    VISUALIZATION_AVAILABLE = True
+except Exception:
+    VISUALIZATION_AVAILABLE = False
+
+try:
+    from fastapi import FastAPI, BackgroundTasks, HTTPException
+    from fastapi.responses import HTMLResponse
+    from fastapi.staticfiles import StaticFiles
+    FASTAPI_AVAILABLE = True
+except Exception:
+    FASTAPI_AVAILABLE = False
+
+try:
+    from playwright.async_api import async_playwright
+except Exception:
+    async_playwright = None
+
+try:
+    from langchain import LLMChain, PromptTemplate
+    from langchain.llms import OpenAI
+except Exception:
+    LLMChain = None
+    PromptTemplate = None
+    OpenAI = None
+
+## Basic artifacts directory
+ARTIFACTS_DIR = "artifacts"
+os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+
+## Visualization setup
+if VISUALIZATION_AVAILABLE:
+    plt.rcParams['figure.figsize'] = [12, 8]
+    sns.set_style("whitegrid")
+
+class VisualDashboard:
+    """Real-time visualization dashboard for test execution"""
+
+    def __init__(self):
+        self.fig, self.axes = plt.subplots(2, 2, figsize=(15, 10))
+        self.fig.suptitle('Multi-Agent Game Tester - Live Dashboard', fontsize=16, fontweight='bold')
+        self.test_results = []
+        self.execution_times = []
+        self.step_status = {'PASS': 0, 'FAIL': 0, 'ERROR': 0}
+
+    def update_test_progress(self, test_id, status, execution_time):
+        """Update test progress visualization"""
+        self.test_results.append({'test_id': test_id, 'status': status, 'time': execution_time})
+        self.execution_times.append(execution_time)
+
+        if status == 'PASS':
+            self.step_status['PASS'] += 1
+        elif status == 'FAIL':
+            self.step_status['FAIL'] += 1
+        else:
+            self.step_status['ERROR'] += 1
+
+        self._refresh_dashboard()
+
+    def _refresh_dashboard(self):
+        """Refresh all dashboard plots"""
+        clear_output(wait=True)
+
+        ## Plot 1: Test Results Overview
+        self.axes[0, 0].clear()
+        status_counts = list(self.step_status.values())
+        status_labels = list(self.step_status.keys())
+        colors = ['##2ecc71', '##e74c3c', '##f39c12']
+        self.axes[0, 0].pie(status_counts, labels=status_labels, colors=colors, autopct='%1.1f%%')
+        self.axes[0, 0].set_title('Test Step Status Distribution')
+
+        ## Plot 2: Execution Time Trend
+        self.axes[0, 1].clear()
+        if self.execution_times:
+            self.axes[0, 1].plot(range(len(self.execution_times)), self.execution_times, 'b-', alpha=0.7)
+            self.axes[0, 1].set_title('Test Execution Time Trend')
+            self.axes[0, 1].set_xlabel('Test Number')
+            self.axes[0, 1].set_ylabel('Execution Time (s)')
+
+        ## Plot 3: Status Over Time
+        self.axes[1, 0].clear()
+        if self.test_results:
+            status_numeric = [1 if r['status'] == 'PASS' else 0 for r in self.test_results]
+            self.axes[1, 0].plot(range(len(status_numeric)), status_numeric, 'go-', alpha=0.7)
+            self.axes[1, 0].set_title('Test Results Over Time (1=PASS, 0=FAIL/ERROR)')
+            self.axes[1, 0].set_xlabel('Test Number')
+            self.axes[1, 0].set_ylabel('Status')
+            self.axes[1, 0].set_yticks([0, 1])
+            self.axes[1, 0].set_yticklabels(['FAIL', 'PASS'])
+
+        ## Plot 4: Summary Statistics
+        self.axes[1, 1].clear()
+        if self.test_results:
+            total_tests = len(self.test_results)
+            passed_tests = sum(1 for r in self.test_results if r['status'] == 'PASS')
+            success_rate = (passed_tests / total_tests) * 100 if total_tests > 0 else 0
+
+            stats_text = f"""
+            Summary Statistics:
+            Total Tests: {total_tests}
+            Passed: {passed_tests}
+            Failed: {total_tests - passed_tests}
+            Success Rate: {success_rate:.1f}%
+            Avg Time: {sum(self.execution_times)/len(self.execution_times):.2f}s
+            """
+            self.axes[1, 1].text(0.1, 0.5, stats_text, fontsize=12, verticalalignment='center')
+            self.axes[1, 1].set_title('Execution Summary')
+            self.axes[1, 1].axis('off')
+
+        plt.tight_layout()
+        plt.show()
+
+## Enhanced PlannerAgent with visual feedback
+class PlannerAgent:
+    def __init__(self, llm=None, dashboard=None):
+        self.llm = llm
+        self.dashboard = dashboard
+
+    async def generate_candidates(self, url: str, count: int = 20) -> List[Dict[str, Any]]:
+        """Generate test candidates with visual progress"""
+        print("Generating test candidates...")
+
+        if VISUALIZATION_AVAILABLE and self.dashboard:
+            ## Show generation progress
+            for i in range(count):
+                self.dashboard.update_test_progress(f"GEN-{i}", "PASS", 0.1)
+                await asyncio.sleep(0.05)  ## Simulate generation time
+
+        ## Original generation logic here...
+        candidates = []
+        for i in range(count):
+            tc_id = f"tc-{i+1:03}"
+            title = f"Test {i+1}: numeric input validation" if i % 3 == 0 else f"Test {i+1}: puzzle flow variant"
+            steps = [
+                {"step_id": 1, "action": "goto", "value": url},
+                {"step_id": 2, "action": "click", "selector": "##start-game"},
+                {"step_id": 3, "action": "type", "selector": "##answer-input", "value": str(i)}
+            ]
+            if i % 5 == 0:
+                steps.append({"step_id": 4, "action": "type", "selector": "##answer-input", "value": "abc"})
+            steps.append({"step_id": 99, "action": "click", "selector": "##submit"})
+            steps.append({"step_id": 100, "action": "assert_text", "selector": ".result", "value": "Correct"})
+            candidates.append({
+                "id": tc_id,
+                "title": title,
+                "description": "Auto-generated candidate",
+                "priority_hint": max(1, 10 - (i % 10)),
+                "tags": ["input-validation"] if i % 3 == 0 else ["happy-path"],
+                "steps": steps,
+            })
+        return candidates
+
+## Enhanced executor with screenshot capture and display
+async def run_test_case_playwright(tc: Dict[str, Any], run_id: str, dashboard=None) -> Dict[str, Any]:
+    """Enhanced executor with visual feedback"""
+    start_time = time.time()
+    result = {"tc_id": tc.get("id"), "steps": [], "artifacts": {}}
+
+    print(f"🔧 Executing {tc.get('id')}: {tc.get('title')}")
+
+    ## Mock execution with visual feedback
+    for s in tc.get("steps", []):
+        step_start = time.time()
+
+        ## Simulate step execution
+        await asyncio.sleep(0.5)  ## Simulate execution time
+
+        step_duration = time.time() - step_start
+        status = "PASS" if s.get('step_id', 0) % 4 != 0 else "FAIL"  ## Simulate occasional failures
+
+        result["steps"].append({
+            "step_id": s.get("step_id"),
+            "action": s.get("action"),
+            "status": status,
+            "duration": step_duration,
+            "note": "mock-execution with visualization"
+        })
+
+        ## Update dashboard
+        if dashboard:
+            dashboard.update_test_progress(
+                f"{tc.get('id')}-S{s.get('step_id')}",
+                status,
+                step_duration
+            )
+
+    total_duration = time.time() - start_time
+
+    ## Generate mock screenshot (base64 encoded placeholder)
+    mock_screenshot = generate_mock_screenshot(tc.get('id'), status)
+    result["artifacts"]["screenshot"] = mock_screenshot
+    result["duration"] = total_duration
+    result["status"] = "PASS" if all(s["status"] == "PASS" for s in result["steps"]) else "FAIL"
+
+    return result
+
+def generate_mock_screenshot(test_id, status):
+    """Generate a mock screenshot visualization"""
+    if VISUALIZATION_AVAILABLE:
+        fig, ax = plt.subplots(figsize=(8, 6))
+
+        ## Create a mock browser window visualization
+        ax.add_patch(plt.Rectangle((0.1, 0.1), 0.8, 0.8, fill=True, color='lightblue', alpha=0.3))
+        ax.text(0.5, 0.7, f'Test: {test_id}', ha='center', va='center', fontsize=14, fontweight='bold')
+        ax.text(0.5, 0.5, f'Status: {status}', ha='center', va='center', fontsize=12,
+               color='green' if status == 'PASS' else 'red')
+        ax.text(0.5, 0.3, 'Mock Browser Window', ha='center', va='center', fontsize=10)
+
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.axis('off')
+        ax.set_title(f'Test Execution: {test_id}', fontsize=16)
+
+        plt.tight_layout()
+        plt.savefig(f'artifacts/{test_id}_screenshot.png', dpi=100, bbox_inches='tight')
+        plt.close()
+
+        return f'artifacts/{test_id}_screenshot.png'
+    return None
+
+## Enhanced orchestrator with video recording capability
+async def orchestrate_run(selected_tests: List[Dict[str, Any]], run_id: str, concurrency: int = 3, dashboard=None):
+    """Enhanced orchestrator with visual feedback"""
+
+    print("Starting test execution with visual dashboard...")
+
+    if dashboard:
+        ## Initialize dashboard
+        display(dashboard.fig)
+
+    queue = asyncio.Queue()
+    for tc in selected_tests:
+        await queue.put(tc)
+
+    async def worker(worker_id: int):
+        while True:
+            try:
+                tc = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            try:
+                start_time = time.time()
+                res = await run_test_case_playwright(tc, run_id, dashboard)
+                execution_time = time.time() - start_time
+
+                ## Update dashboard with final result
+                if dashboard:
+                    dashboard.update_test_progress(tc.get("id"), res["status"], execution_time)
+
+            except Exception as e:
+                res = {"tc_id": tc.get("id"), "steps": [], "error": str(e)}
+                if dashboard:
+                    dashboard.update_test_progress(tc.get("id"), "ERROR", 0)
+            finally:
+                queue.task_done()
+
+    workers = [asyncio.create_task(worker(i)) for i in range(concurrency)]
+    await asyncio.gather(*workers)
+
+    print("Test execution completed!")
+
+## Video recording function for 30-second demo
+def create_video_demo():
+    """Create a 30-second video demo of the system"""
+    print("Creating 30-second video demo...")
+
+    ## Create a summary video using matplotlib animation
+    if VISUALIZATION_AVAILABLE:
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        def animate(frame):
+            ax.clear()
+            ## Simulate test execution progress
+            progress = min(frame / 30, 1.0)  ## 30-second animation
+
+            ## Create progress visualization
+            ax.barh(['Test Generation', 'Test Execution', 'Analysis'],
+                   [progress * 100, progress * 80, progress * 60])
+            ax.set_xlim(0, 100)
+            ax.set_xlabel('Completion (%)')
+            ax.set_title(f'Multi-Agent Game Tester Demo - {int(progress*100)}% Complete')
+
+            ## Add status text
+            ax.text(50, 2.2, f'Elapsed: {frame}s / 30s', ha='center', fontweight='bold')
+
+            if progress >= 1.0:
+                ax.text(50, 0.5, 'DEMO COMPLETE! ', ha='center', fontsize=16, fontweight='bold')
+
+        ## Create animation
+        anim = FuncAnimation(fig, animate, frames=31, interval=1000, repeat=False)
+
+        ## Display the animation
+        from IPython.display import HTML
+        html_content = anim.to_jshtml()
+        display(HTML(html_content))
+
+        print("30-second video demo created!")
+        return anim
+    else:
+        print("Visualization libraries not available for video demo")
+
+## Enhanced CLI with visual options
+async def cli_demo_visual(args):
+    """Enhanced demo with visual dashboard"""
+    ## Initialize dashboard
+    dashboard = VisualDashboard() if VISUALIZATION_AVAILABLE else None
+
+    print("Starting visual demo...")
+    print("Launching real-time dashboard...")
+
+    info = await create_plan_and_save(url=args.url or "https://play.ezygamers.com/", count=5)
+    plan_path = info["plan_path"]
+    res = await execute_plan_and_generate_report(plan_path, top_n=3, dashboard=dashboard)
+
+    ## Create video demo
+    create_video_demo()
+
+    return res
+
+
+## Enhanced main functions with dashboard support
+async def create_plan_and_save(url: str, count: int = 20, dashboard=None) -> Dict[str, Any]:
+    planner = PlannerAgent(dashboard=dashboard)
+    candidates = await planner.generate_candidates(url=url, count=count)
+    plan_id = str(uuid.uuid4())
+
+    ## Save plan with visualization data
+    plan_data = {
+        "plan_id": plan_id,
+        "url": url,
+        "count": count,
+        "generated_at": datetime.now().isoformat(),
+        "candidates": candidates
+    }
+
+    plan_path = os.path.join(ARTIFACTS_DIR, f"plan-{plan_id}.json")
+    with open(plan_path, "w") as f:
+        json.dump(plan_data, f, indent=2)
+
+    return {"plan_id": plan_id, "candidates_count": len(candidates), "plan_path": plan_path}
+
+async def execute_plan_and_generate_report(plan_id_or_path: str, selected_ids: Optional[List[str]] = None,
+                                         top_n: int = 10, dashboard=None) -> Dict[str, Any]:
+    ## Load plan
+    if os.path.exists(plan_id_or_path):
+        with open(plan_id_or_path, "r") as f:
+            plan_data = json.load(f)
+        plan_content = plan_data.get("candidates", [])
+    else:
+        raise RuntimeError("Plan not found")
+
+    ## Select tests
+    selected = plan_content[:top_n]
+
+    run_id = str(uuid.uuid4())
+    run_data = {
+        "run_id": run_id,
+        "plan_id": plan_id_or_path,
+        "started_at": datetime.now().isoformat(),
+        "selected": [c.get("id") for c in selected]
+    }
+
+    await orchestrate_run(selected, run_id, concurrency=2, dashboard=dashboard)
+
+    run_data["completed_at"] = datetime.now().isoformat()
+    run_data["status"] = "COMPLETED"
+
+    report_path = os.path.join(ARTIFACTS_DIR, f"{run_id}.report.json")
+    with open(report_path, "w") as f:
+        json.dump(run_data, f, indent=2)
+
+    return {"run_id": run_id, "report_path": report_path}
+
+## Enhanced CLI commands
+def cli_main():
+    parser = argparse.ArgumentParser(description="Multi-Agent Game Tester with Visual Dashboard")
+    sub = parser.add_subparsers(dest="cmd")
+
+    ## Visual demo command
+    p_vdemo = sub.add_parser("visual-demo", help="Run demo with visual dashboard")
+    p_vdemo.add_argument("--url", default="https://play.ezygamers.com/")
+    p_vdemo.add_argument("--duration", type=int, default=30, help="Demo duration in seconds")
+
+    ## Original commands
+    p_plan = sub.add_parser("plan", help="Generate plan and save")
+    p_plan.add_argument("--url", required=True)
+    p_plan.add_argument("--count", type=int, default=10)
+
+    p_exec = sub.add_parser("execute", help="Execute a plan file or plan-id")
+    p_exec.add_argument("--plan-id", required=True)
+    p_exec.add_argument("--selected-ids", default=None)
+    p_exec.add_argument("--top-n", type=int, default=10)
+
+    p_demo = sub.add_parser("demo", help="Run a short demo")
+    p_demo.add_argument("--url", default="https://play.ezygamers.com/")
+
+    args = parser.parse_args()
+
+    if args.cmd == "visual-demo":
+        ## Directly await the coroutine without creating a new event loop
+        asyncio.get_event_loop().run_until_complete(cli_demo_visual(args))
+    elif args.cmd == "plan":
+        ## Original plan command
+        loop = asyncio.get_event_loop()
+        info = loop.run_until_complete(create_plan_and_save(url=args.url, count=args.count))
+        print(f"Plan created: {info['plan_id']}")
+    elif args.cmd == "execute":
+        ## Original execute command
+        loop = asyncio.get_event_loop()
+        selected_ids = args.selected_ids.split(",") if args.selected_ids else None
+        info = loop.run_until_complete(execute_plan_and_generate_report(args.plan_id, selected_ids, args.top_n))
+        print(f"Run completed: {info['run_id']}")
+    elif args.cmd == "demo":
+        ## Original demo command
+        asyncio.get_event_loop().run_until_complete(cli_demo_visual(args))  ## Use visual demo for regular demo too
+    else:
+        parser.print_help()
+
