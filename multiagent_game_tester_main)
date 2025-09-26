@@ -1,0 +1,49 @@
+!pip install nest_asyncio
+
+import nest_asyncio
+import asyncio
+import inspect
+import json
+import time
+import random
+from multiagent_game_tester_main import cli_demo_visual
+
+## Apply nest_asyncio to allow nested event loops
+nest_asyncio.apply()
+
+class MockArgs:
+    def __init__(self, url=None, duration=30):
+        self.url = url or "https://play.ezygamers.com/"
+        self.duration = duration
+        self.cmd = 'visual-demo'
+
+def run_visual_demo_safe():
+    """Safely run the visual demo in Colab environment"""
+    args = MockArgs()
+
+    ## Check if the function is async
+    if inspect.iscoroutinefunction(cli_demo_visual):
+        print("Running async visual demo...")
+
+        ## Create and run the async function
+        async def async_wrapper():
+            await cli_demo_visual(args)
+
+        ## Use the current event loop
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            ## Schedule as a task
+            task = loop.create_task(async_wrapper())
+            return task
+        else:
+            ## Run until complete
+            return loop.run_until_complete(async_wrapper())
+    else:
+        print("Running sync visual demo...")
+        ## Direct call for synchronous function
+        return cli_demo_visual(args)
+
+## Run the demo
+run_visual_demo_safe()
+
+
